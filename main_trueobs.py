@@ -9,7 +9,17 @@ from datautils import *
 from modelutils import *
 from quant import *
 from trueobs import *
+from datasets import load_dataset
+from transformers import AutoImageProcessor
+import ipdb
 
+
+def transform(data_batch, processor):
+    IMAGE = data_batch["image"]
+    IMAGE = [image.convert('RGB') for image in IMAGE]
+    inputs = processor(IMAGE, return_tensors="pt")
+    inputs["labels"] = data_batch["label"]
+    return inputs
 
 parser = argparse.ArgumentParser()
 
@@ -48,12 +58,17 @@ parser.add_argument('--sparse-dir', type=str, default='')
 
 args = parser.parse_args()
 
-dataloader, testloader = get_loaders(
-    args.dataset, path=args.datapath, 
-    batchsize=args.batchsize, workers=args.workers,
-    nsamples=args.nsamples, seed=args.seed,
-    noaug=args.noaug
-)
+ds = load_dataset(path="Tsomaros/Imagenet-1k_validation", cache_dir='/Data/Dataset/ImageNet', split='validation')
+processor = AutoImageProcessor.from_pretrained("microsoft/swinv2-base-patch4-window8-256")
+prepared_ds = ds.with_transform(lambda batch: transform(batch, processor))
+dataloader = torch.utils.data.DataLoader(prepared_ds, batch_size=256, shuffle=True, num_workers=8)
+# dataloader, testloader = get_loaders(
+#     args.dataset, path=args.datapath, 
+#     batchsize=args.batchsize, workers=args.workers,
+#     nsamples=args.nsamples, seed=args.seed,
+#     noaug=args.noaug
+# )
+
 if args.nrounds == -1:
     args.nrounds = 1 if 'yolo' in args.model or 'bert' in args.model else 10 
     if args.noaug:
@@ -180,4 +195,4 @@ if aquant:
 if args.save:
     torch.save(modelp.state_dict(), args.save)
 
-test(modelp, testloader)
+# test(modelp, testloader)

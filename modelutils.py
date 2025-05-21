@@ -121,8 +121,8 @@ def get_test(name):
 def run(model, batch, loss=False, retmoved=False):
     dev = next(iter(model.parameters())).device
     if retmoved:
-        return (batch[0].to(dev), batch[1].to(dev))
-    out = model(batch[0].to(dev))
+        return (batch['pixel_values'].to(dev), batch['labels'].to(dev))
+    out = model(batch['pixel_values'].to(dev))
     if loss:
         return nn.functional.cross_entropy(out, batch[1].to(dev)).item() * batch[0].shape[0]
     return out
