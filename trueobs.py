@@ -6,7 +6,7 @@ import torch.nn as nn
 
 from quant import *
 
-
+import ipdb
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
@@ -109,13 +109,24 @@ class TrueOBS:
         return start
 
     def quantize(self, parallel=32):
-        W, H, Hinv1, Losses = self.prepare()
-
+        W, H, Hinv1, Losses = self.prepare() # 레이어별로 H, Hinv 구함 W 는  원 shape 사용 1000,512     
         Q = torch.zeros_like(W)
-        self.quantizer.find_params(W, weight=True)
-
+        self.quantizer.find_params(W, weight=True) # 일단 간단한 ptq 로 weight에 대한  scale 과 zp 구함 sym이므로 zp=0, absmax->mse 
+        # parallel = 1
+        # ipdb.set_trace()
         for i1 in range(0, self.rows, parallel):
+            # 실제로는 배치별로 동작하는데 효율성 위해 미니배치로 처리
             i2, count, w, Hinv, mask, rangecount, idxcount = self.prepare_iter(i1, parallel, W, Hinv1)
+            # i1 : 현재 배치 시작 index
+            # i2 : 다음 배치 시작 index
+            # count : 이번 배치에서 처리할 행의 개수
+            # w : 미니배치에 해당하는 부분 W                 (count, self.columns)
+            # Hinv : Hinv1(원본 H_inv)의 각행만큼의 복사본   (count, self.columns, self.columns)
+            # mask : 현재 미니배치 내 가중치들에 대한 마스크  (count, self.columns)
+            #                                               False 초기화 
+            # rangecount : 0 ~ count-1  배치내 상대적   인덱스
+            # idxcount   : i1 ~ i2-1   전체 가중치 실제 인덱스
+            ipdb.set_trace()
             start = self.prepare_sparse(w, mask, Hinv, H)
 
             outlier = .25 * (self.quantizer.scale ** 2)[i1:i2, :]

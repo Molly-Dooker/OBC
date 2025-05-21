@@ -130,14 +130,21 @@ if not (args.compress == 'quant' and not wquant):
     handles = []
     for name in trueobs:
         handles.append(layersd[name].register_forward_hook(add_batch(name)))
-    for i in range(args.nrounds):
+    
+    #↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
+    # 레이어별로 헤시안 구함
+    # for i in range(args.nrounds):    
+    for i in range(1): # 간이 테스트
         for j, batch in enumerate(dataloader):
             print(i, j)
             with torch.no_grad():
                 run(modeld, batch)
+            if j==4 : break # 간이 테스트
     for h in handles:
-        h.remove()
+        h.remove()    
+    #↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
     for name in trueobs:
+        if not name=='fc': continue
         print(name)
         if args.compress == 'quant':
             print('Quantizing ...')
@@ -145,7 +152,8 @@ if not (args.compress == 'quant' and not wquant):
         if args.compress == 'nmprune':
             if trueobs[name].columns % args.prunem == 0:
                 print('N:M pruning ...')
-                trueobs[name].nmprune(args.prunen, args.prunem)
+                trueobs[name].nmprune(args.prunen, args.prunem)        
+
         if sparse:
             Ws = None
             if args.compress == 'unstr':
