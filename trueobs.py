@@ -1,6 +1,6 @@
 import math
 import time
-
+from tqdm import tqdm
 import torch
 import torch.nn as nn
 
@@ -114,9 +114,9 @@ class TrueOBS:
         W, H, Hinv1, Losses = self.prepare() # 레이어별로 H, Hinv 구함 W 는  원 shape 사용 1000,512     
         Q = torch.zeros_like(W)
         self.quantizer.find_params(W, weight=True) # 일단 간단한 ptq 로 weight에 대한  scale 과 zp 구함 sym이므로 zp=0, absmax->mse 
-        parallel = 1
-        for i1 in range(0, self.rows, parallel):
-            # 실제로는 배치별로 동작하는데 효율성 위해 미니배치로 처리
+        parallel = 32
+        for i1 in tqdm(range(0, self.rows, parallel),desc='batch'):
+            # 실제로는 row별로 동작하는데 효율성 위해 미니배치로 처리
             i2, count, w, Hinv, mask, rangecount, idxcount = self.prepare_iter(i1, parallel, W, Hinv1)
             # i1 : 현재 배치 시작 index
             # i2 : 다음 배치 시작 index
@@ -168,25 +168,28 @@ class TrueOBS:
                 row = Hinv[rangecount, j, :] # H_:,p^-1 (선택된 가중치 j에 해당하는 Hinv의 행)   공식에 따르면 col 가져오는건데 왜 row 라고 이름 붙이는 지는 모르겠음.
                 d = diag[rangecount, j]      # [H^-1]_pp (선택된 가중치 j에 해당하는 Hinv 대각 성분)
                 # w_new = w_old - H_:,p^-1 * ( (w_p_old - q_p_quantized) / [H^-1]_pp )
-                w -= row * ((w[rangecount, j] - q1) / d).unsqueeze(1) # 나머지 가중치 업데이트
+
+                delta_p = -row * ((w[rangecount, j] - q1) / d).unsqueeze(1)
+                w += delta_p # 나머지 가중치 업데이트  w 에 delta_p 를 더함   코드상으론 전체 w 를 다 업데이트 하긴 하는데 논리상,  이번 loop 에서  양자화된 가중치들의 index 는 영향이 없음.
 
                 mask[rangecount, j] = True # 처리된 가중치 마스크
 
                 if quant_step == self.columns: # 모든 열(가중치)이 처리되었으면 종료
                     break
-
                 # --- OBS의 핵심: 역 헤시안 Hinv 업데이트 (Lemma 1 적용) ---
                 # 다음 반복을 위해, 방금 "처리된" 가중치 j의 영향을 Hinv에서 제거
                 row /= torch.sqrt(d).unsqueeze(1) # 스케일링된 Hinv 행
-                Hinv -= torch.bmm(row.unsqueeze(2), row.unsqueeze(1)) # Hinv 업데이트
+                Hinv -= torch.bmm(row.unsqueeze(2), row.unsqueeze(1)) # Hinv 업데이트 . 이론적으로 Hinv1 가 대칭행렬 (실제로는 부동소수점 연산으로 인해 대칭이 약간 벗어나긴함)
                 
             Losses[i1:i2, :] /= 2 # 최종 손실 조정
 
             torch.cuda.synchronize()
-            print('%04d %04d time %.2f' % (i1, i2, time.time() - tick))
+            # print('%04d %04d time %.2f' % (i1, i2, time.time() - tick))
 
         print('error', torch.sum(Losses).item())
+        ipdb.set_trace()
         self.layer.weight.data = Q.reshape(self.layer.weight.shape)
+        
         if DEBUG:
             print(torch.sum((self.layer(self.inp1) - self.out1) ** 2) / 128)
 
