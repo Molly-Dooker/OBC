@@ -96,24 +96,25 @@ class TrueOBS:
         idxcount = rangecount + i1
         return i2, count, w, Hinv, mask, rangecount, idxcount
 
-    def prepare_sparse(self, w, mask, Hinv, H): 
-        start = int(torch.min(torch.sum((w == 0).float(), 1)).item()) + 1
-        for i in range(w.shape[0]):
-            tmp = w[i] == 0
+    def prepare_sparse(self, weight, mask, Hinv, H):
+        start = int(torch.min(torch.sum((weight == 0).float(), 1)).item()) + 1
+        # 행별 weight 값 0 인 요소 개수들의 min 값+1
+        for i in range(weight.shape[0]):
+            tmp = weight[i] == 0
             H1 = H.clone()
             H1[tmp, :] = 0
             H1[:, tmp] = 0
             H1[tmp, tmp] = 1
             Hinv[i] = self.invert(H1)
             mask[i, torch.nonzero(tmp, as_tuple=True)[0][:(start - 1)]] = True
+            # hessian 은 w==0 인걸 반영했지만 mask 는 그대로 반영안하고 start 에 기반해서 반영함
         return start
 
     def quantize(self, parallel=32):
         W, H, Hinv1, Losses = self.prepare() # 레이어별로 H, Hinv 구함 W 는  원 shape 사용 1000,512     
         Q = torch.zeros_like(W)
         self.quantizer.find_params(W, weight=True) # 일단 간단한 ptq 로 weight에 대한  scale 과 zp 구함 sym이므로 zp=0, absmax->mse 
-        # parallel = 1
-        # ipdb.set_trace()
+        parallel = 1
         for i1 in range(0, self.rows, parallel):
             # 실제로는 배치별로 동작하는데 효율성 위해 미니배치로 처리
             i2, count, w, Hinv, mask, rangecount, idxcount = self.prepare_iter(i1, parallel, W, Hinv1)
@@ -126,39 +127,60 @@ class TrueOBS:
             #                                               False 초기화 
             # rangecount : 0 ~ count-1  배치내 상대적   인덱스
             # idxcount   : i1 ~ i2-1   전체 가중치 실제 인덱스
-            ipdb.set_trace()
             start = self.prepare_sparse(w, mask, Hinv, H)
-
+            # start      : 미니배치에서 모든 행에 대해 이미 0 처리된 w 카운트
             outlier = .25 * (self.quantizer.scale ** 2)[i1:i2, :]
             scale = self.quantizer.scale[i1:i2, :]
             zero = self.quantizer.zero[i1:i2, :]
 
             tick = time.time()
 
-            for quant in range(start, self.columns + 1):
-                q = quantize(w, scale, zero, self.quantizer.maxq)
-                err = (w - q) ** 2
+            # --- 3. 반복적 가중치 양자화 루프 (논문의 Iterative Quantization) ---
+            for quant_step in range(start, self.columns + 1):
+                # ipdb.set_trace()
+                # 현재 가중치 w를 양자화한 후보 q_candidate 계산
+                q_candidate = quantize(w, scale, zero, self.quantizer.maxq) # quant.py의 함수
+                # 양자화로 인한 제곱 오차 err 계산
+                err = (w - q_candidate) ** 2
+                # Hinv의 대각 성분 diag ([H^-1]_pp) 추출
                 diag = torch.diagonal(Hinv, dim1=1, dim2=2)
-                scores = err / diag
-                scores[mask] = float('inf')
-                err[mask] = 0
+
+                # --- 2. 양자화할 가중치 선택 (논문 식 (7)의 argmin 부분) ---
+                # OBS 점수 계산: err / diag
+                scores = err / diag #  논문 수식 7 
+                scores[mask] = float('inf') # 이미 처리된 가중치는 제외
+                err[mask] = 0 # 오차도 0으로 (이미 처리됨)
+                # 행별로 점수가 가장 낮은 가중치의 인덱스 j 선택
                 j = torch.argmin(scores, 1)
-                sel = torch.any(err > outlier, 1)
-                sel &= w[rangecount, j] != 0
-                if torch.any(sel):
-                    j[sel] = torch.argmax(err[sel, :], 1)
-                Losses[i1:i2, quant] = scores[rangecount, j]
-                q1 = q[rangecount, j]
-                Q[idxcount, j] = q1
-                row = Hinv[rangecount, j, :]
-                d = diag[rangecount, j]
-                w -= row * ((w[rangecount, j] - q1) / d).unsqueeze(1)
-                mask[rangecount, j] = True
-                if quant == self.columns:
+
+                # --- 4. 이상치 처리 적용 (논문의 Outlier 처리 휴리스틱) ---
+                sel = torch.any(err > outlier, 1) # 이상치 조건 만족 여부
+                sel &= w[rangecount, j] != 0      # 선택된 가중치가 0이 아닌지 / 실제로 유의미한 오차를 발생시킬 수 있는, 0이 아닌 가중치에 대해서만 활성화되도록 보장
+                if torch.any(sel):                # 이상치가 있다면
+                    j[sel] = torch.argmax(err[sel, :], 1) # 해당 행에서는 오차가 가장 큰 가중치를 선택
+                # 즉 j 는 기본적으로 행단위로 가장 score 가 작은 idx 이지만  outlier 가 있을 경우 (가장 큰 아웃라이어로 )우선적으로 선택된다. 
+                
+                # 손실 기록 및 실제 양자화
+                Losses[i1:i2, quant_step] = scores[rangecount, j]
+                q1 = q_candidate[rangecount, j] # 선택된 가중치 j에 대한 양자화 값
+                Q[idxcount, j] = q1             # 최종 양자화 행렬에 저장
+                # --- 2. 나머지 가중치 업데이트 (논문 식 (7)의 delta_p 부분) ---
+                row = Hinv[rangecount, j, :] # H_:,p^-1 (선택된 가중치 j에 해당하는 Hinv의 행)   공식에 따르면 col 가져오는건데 왜 row 라고 이름 붙이는 지는 모르겠음.
+                d = diag[rangecount, j]      # [H^-1]_pp (선택된 가중치 j에 해당하는 Hinv 대각 성분)
+                # w_new = w_old - H_:,p^-1 * ( (w_p_old - q_p_quantized) / [H^-1]_pp )
+                w -= row * ((w[rangecount, j] - q1) / d).unsqueeze(1) # 나머지 가중치 업데이트
+
+                mask[rangecount, j] = True # 처리된 가중치 마스크
+
+                if quant_step == self.columns: # 모든 열(가중치)이 처리되었으면 종료
                     break
-                row /= torch.sqrt(d).unsqueeze(1)
-                Hinv -= torch.bmm(row.unsqueeze(2), row.unsqueeze(1))
-            Losses[i1:i2, :] /= 2
+
+                # --- OBS의 핵심: 역 헤시안 Hinv 업데이트 (Lemma 1 적용) ---
+                # 다음 반복을 위해, 방금 "처리된" 가중치 j의 영향을 Hinv에서 제거
+                row /= torch.sqrt(d).unsqueeze(1) # 스케일링된 Hinv 행
+                Hinv -= torch.bmm(row.unsqueeze(2), row.unsqueeze(1)) # Hinv 업데이트
+                
+            Losses[i1:i2, :] /= 2 # 최종 손실 조정
 
             torch.cuda.synchronize()
             print('%04d %04d time %.2f' % (i1, i2, time.time() - tick))
