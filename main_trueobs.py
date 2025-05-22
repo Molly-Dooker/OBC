@@ -92,6 +92,7 @@ SPARSE_DEFAULTS = {
     'struct': (0, .9, .05),
     'blocked': (0, .95, .1)
 }
+
 sparse = args.compress in SPARSE_DEFAULTS
 if sparse: 
     if args.min_sparsity == 0 and args.max_sparsity == 0: 
@@ -153,7 +154,7 @@ if not (args.compress == 'quant' and not wquant):
             if trueobs[name].columns % args.prunem == 0:
                 print('N:M pruning ...')
                 trueobs[name].nmprune(args.prunen, args.prunem)        
-
+        ipdb.set_trace()
         if sparse:
             Ws = None
             if args.compress == 'unstr':

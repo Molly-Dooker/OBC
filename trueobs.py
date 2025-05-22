@@ -233,39 +233,68 @@ class TrueOBS:
             print(torch.sum((self.layer(self.inp1) - self.out1) ** 2) / 128)
 
     def prepare_unstr(self, parallel=32):
-        W, H, Hinv1, Losses = self.prepare()
+        # 1. 기본 준비: 가중치(W), 헤시안(H), 역 헤시안(Hinv1), 손실 기록용 텐서(Losses) 준비
+        # 이 Losses는 self.Losses로 저장되어 멤버 변수로 사용됨
+        W, H, Hinv1, self.Losses = self.prepare() #
 
-        self.Losses = Losses
-        self.Traces = []
+        # 2. 가중치 변화 추적을 위한 Traces 리스트 초기화
+        self.Traces = [] #
 
+        # 3. 행(row) 단위 병렬 처리를 위한 루프
         for i1 in range(0, self.rows, parallel):
-            i2, count, w, Hinv, mask, rangecount, idxcount = self.prepare_iter(i1, parallel, W, Hinv1)
-            start = self.prepare_sparse(w, mask, Hinv, H) 
+            # 현재 미니배치 처리를 위한 변수들 준비 (w: 현재 행들의 가중치, Hinv: 복제된 역헤시안 등)
+            i2, count, w, Hinv, mask, rangecount, idxcount = self.prepare_iter(i1, parallel, W, Hinv1) #
+            # 이미 0인 가중치가 있다면 Hinv 조정 및 OBS 시작점(start) 결정
+            start = self.prepare_sparse(w, mask, Hinv, H) #
 
-            Trace = torch.zeros((self.columns + 1, count, self.columns), device=self.dev)
-            Trace[0, :, :] = w
-            Trace[:start, :, :] = w
+            # 4. 현재 미니배치에 대한 가중치 변화 추적(Trace)을 위한 텐서 초기화
+            # Trace 텐서는 (제거된 가중치 수 + 1, 현재 미니배치 행 수, 전체 열 수) 크기를 가짐
+            Trace = torch.zeros((self.columns + 1, count, self.columns), device=self.dev) #
+            Trace[0, :, :] = w # 0개의 가중치가 제거된 상태 (원본 w)를 Trace의 첫 번째 슬라이스에 저장
+            Trace[:start, :, :] = w # 이미 0인 가중치를 고려한 시작점(start) 이전까지는 원본 w와 동일하다고 간주
 
             tick = time.time()
 
-            for zeros in range(start, self.columns + 1):
-                diag = torch.diagonal(Hinv, dim1=1, dim2=2)
-                scores = (w ** 2) / diag
-                scores[mask] = float('inf')
-                j = torch.argmin(scores, 1)
-                self.Losses[i1:i2, zeros] = scores[rangecount, j]
-                row = Hinv[rangecount, j, :]
-                d = diag[rangecount, j]
-                w -= row * (w[rangecount, j] / d).unsqueeze(1)
-                mask[rangecount, j] = True
-                w[mask] = 0
-                Trace[zeros, :, :] = w
+            # 5. 반복적 가중치 제거 루프 (OBS 기반 비정형 가지치기)
+            # 'start'는 이미 0인 가중치를 제외하고 실제 OBS 제거를 시작할 단계를 의미
+            for zeros in range(start, self.columns + 1): # zeros는 제거할 가중치의 누적 개수를 의미
+                # Hinv의 대각 성분 추출 ([H^-1]_pp)
+                diag = torch.diagonal(Hinv, dim1=1, dim2=2) #
+                # OBS 점수 계산: w_p^2 / [H^-1]_pp. 점수가 낮은 가중치가 제거 우선순위가 높음.
+                scores = (w ** 2) / diag #
+                scores[mask] = float('inf') # 이미 처리(제거)된 가중치는 무한대의 점수를 부여하여 다시 선택되지 않도록 함
+                # 현재 처리 중인 각 행(row)에서 가장 낮은 점수를 가진 가중치의 인덱스(j)를 찾음
+                j = torch.argmin(scores, 1) #
+                # 선택된 가중치(j)를 제거했을 때의 손실(score)을 self.Losses에 기록
+                self.Losses[i1:i2, zeros] = scores[rangecount, j] #
+
+                # OBS 가중치 업데이트:
+                # 선택된 가중치(j)를 0으로 만드는 것에 대한 오차를 보상하기 위해
+                # 나머지 아직 제거되지 않은 가중치들을 업데이트.
+                row = Hinv[rangecount, j, :] # H_:,p^-1 (선택된 가중치 j에 해당하는 Hinv의 행)
+                d = diag[rangecount, j]      # [H^-1]_pp (선택된 가중치 j에 해당하는 Hinv 대각 성분)
+                # w_new = w_old - H_:,p^-1 * ( w_p_old / [H^-1]_pp )
+                w -= row * (w[rangecount, j] / d).unsqueeze(1) # 나머지 가중치 업데이트
+
+                # 방금 제거한(0으로 만들) 가중치를 mask에 True로 표시
+                mask[rangecount, j] = True #
+                # 실제로 마스크된 위치의 가중치 값을 0으로 설정
+                w[mask] = 0 #
+                # 현재 단계(zeros개의 가중치가 제거된 상태)의 가중치 행렬 w를 Trace에 기록
+                Trace[zeros, :, :] = w #
+
+                # 모든 가중치가 제거되었다면 루프 종료
                 if zeros == self.columns:
                     break
-                row /= torch.sqrt(d).unsqueeze(1)
-                Hinv -= torch.bmm(row.unsqueeze(2), row.unsqueeze(1))
-            self.Losses[i1:i2, :] /= 2
-            self.Traces.append(Trace.cpu())
+
+                # 역 헤시안 Hinv 업데이트 (Lemma 1 적용)
+                row /= torch.sqrt(d).unsqueeze(1) # 스케일링된 Hinv 행
+                Hinv -= torch.bmm(row.unsqueeze(2), row.unsqueeze(1)) # Hinv 업데이트
+
+            # 손실 값을 2로 나눔 (OBS 공식 관련 조정)
+            self.Losses[i1:i2, :] /= 2 #
+            # 계산된 Trace를 CPU 메모리로 옮겨 저장 (GPU 메모리 절약)
+            self.Traces.append(Trace.cpu()) #
 
             torch.cuda.synchronize()
             print('%04d %04d time %.2f' % (i1, i2, time.time() - tick))
