@@ -187,7 +187,6 @@ class TrueOBS:
             # print('%04d %04d time %.2f' % (i1, i2, time.time() - tick))
 
         print('error', torch.sum(Losses).item())
-        ipdb.set_trace()
         self.layer.weight.data = Q.reshape(self.layer.weight.shape)
         
         if DEBUG:

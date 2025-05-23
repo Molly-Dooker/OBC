@@ -147,6 +147,7 @@ if not (args.compress == 'quant' and not wquant):
     for name in trueobs:
         if not name=='fc': continue
         print(name)
+        ipdb.set_trace()
         if args.compress == 'quant':
             print('Quantizing ...')
             trueobs[name].quantize()
@@ -154,7 +155,7 @@ if not (args.compress == 'quant' and not wquant):
             if trueobs[name].columns % args.prunem == 0:
                 print('N:M pruning ...')
                 trueobs[name].nmprune(args.prunen, args.prunem)        
-        ipdb.set_trace()
+        
         if sparse:
             Ws = None
             if args.compress == 'unstr':
