@@ -147,12 +147,11 @@ if not (args.compress == 'quant' and not wquant):
     for name in trueobs:
         if not name=='fc': continue
         print(name)
-        ipdb.set_trace()
         if args.compress == 'quant':
             print('Quantizing ...')
             trueobs[name].quantize()
         if args.compress == 'nmprune':
-            if trueobs[name].columns % args.prunem == 0:
+            if trueobs[name].columns % args.prunem == 0: # 레이어 전체열수 가 M 으로 나눠 떨어지는 경우에 진행 (모호함 피하기 위해)
                 print('N:M pruning ...')
                 trueobs[name].nmprune(args.prunen, args.prunem)        
         
