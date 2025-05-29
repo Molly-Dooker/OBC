@@ -4,7 +4,7 @@ import os
 
 import torch
 import torch.nn as nn
-
+from typing import Optional
 from datautils import *
 from modelutils import *
 from quant import *
@@ -14,6 +14,21 @@ from transformers import AutoImageProcessor
 from torch.nn import Linear, Conv2d
 import ipdb
 
+
+
+def _calibrate_input(m: torch.nn.Module, input: torch.Tensor, momentum: float = 0.9):
+    input = input[0]    
+    new_scale = input.abs().max()/m.maxq
+    if not hasattr(m,'act_scale'):
+        m.register_buffer('act_scale',new_scale)
+    else:
+        m.act_scale = momentum * m.act_scale + new_scale * (1.0 - momentum)
+    return input
+
+def _quantize_input(m: torch.nn.Module, input: torch.Tensor):
+    input = input[0]    
+    qdq_input = torch.clamp(torch.round(input / m.act_scale) , m.minq, m.maxq)*m.act_scale
+    return qdq_input
 
 def get_module(module: nn.Module, name: str):
     """
@@ -95,15 +110,7 @@ prepared_ds = ds.with_transform(lambda batch: transform(batch, processor))
 dataloader = torch.utils.data.DataLoader(prepared_ds, batch_size=256, shuffle=True, num_workers=8)
 
 
-# if args.nrounds == -1:
-#     args.nrounds = 1 if 'yolo' in args.model or 'bert' in args.model else 10 
-#     if args.noaug:
-#         args.nrounds = 1
 get_model, test, run = get_functions(args.model)
-
-# aquant = args.compress == 'quant' and args.abits < 32
-# wquant = args.compress == 'quant' and args.wbits < 32
-
 model = get_model()
 
 trueobs = {}
@@ -135,7 +142,8 @@ for i in range(1): # 간이 테스트
 for h in handles:
     h.remove()    
 
-#↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
+
+# W quantization
 for name in trueobs:
     print(name)
     print('Quantizing ...')
@@ -143,3 +151,34 @@ for name in trueobs:
     m = get_module(model,name)
     m.register_buffer('w_scale',trueobs[name].quantizer.scale)
     trueobs[name].free()
+  
+
+
+
+
+# Act quantization
+handles = []
+for name, m in model.named_modules():
+    if not isinstance(m,(Linear,Conv2d)): continue
+    m.register_buffer('maxq',torch.tensor(2**(args.wbits-1)-1, device=m.weight.device))
+    m.register_buffer('minq',torch.tensor(-2**(args.wbits-1),  device=m.weight.device))
+    handles.append(m.register_forward_pre_hook(_calibrate_input))   
+for j, batch in enumerate(dataloader):
+    with torch.no_grad():
+        run(model, batch)
+    if j ==4 : break
+for h in handles:
+    h.remove() 
+
+
+handles = []
+for name, m in model.named_modules():
+    if not isinstance(m,(Linear,Conv2d)): continue
+    m.register_forward_pre_hook(_quantize_input)
+
+
+# 평가
+for j, batch in enumerate(dataloader):
+    with torch.no_grad():
+        run(model, batch)
+    if j ==4 : break
