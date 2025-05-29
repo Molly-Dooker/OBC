@@ -53,11 +53,13 @@ class TrueOBS:
 
     def invert(self, H):
         try:
-            Hinv = torch.cholesky_inverse(torch.linalg.cholesky(H))
+            # Hinv = torch.cholesky_inverse(torch.linalg.cholesky(H))
+            Hinv = torch.cholesky_inverse(torch.linalg.cholesky(H.cpu())).to('cuda')
         except RuntimeError:
             print('Hessian not full rank.')
             tmp = 1 * torch.eye(self.columns, device=self.dev)
-            Hinv = torch.cholesky_inverse(torch.linalg.cholesky(H + tmp))
+            # Hinv = torch.cholesky_inverse(torch.linalg.cholesky(H + tmp))
+            Hinv = torch.cholesky_inverse(torch.linalg.cholesky((H + tmp).cpu())).to('cuda')
         return Hinv
 
     def prepare(self, columnslast=False):
@@ -131,7 +133,7 @@ class TrueOBS:
             # start      : 미니배치에서 모든 행에 대해 이미 0 처리된 w 카운트
             outlier = .25 * (self.quantizer.scale ** 2)[i1:i2, :]
             scale = self.quantizer.scale[i1:i2, :]
-            zero = self.quantizer.zero[i1:i2, :]
+            # zero = self.quantizer.zero[i1:i2, :]
 
             tick = time.time()
 
@@ -139,7 +141,7 @@ class TrueOBS:
             for quant_step in range(start, self.columns + 1):
                 # ipdb.set_trace()
                 # 현재 가중치 w를 양자화한 후보 q_candidate 계산
-                q_candidate = quantize(w, scale, zero, self.quantizer.maxq) # quant.py의 함수
+                q_candidate = quantize(w, scale, self.quantizer.minq, self.quantizer.maxq) # quant.py의 함수
                 # 양자화로 인한 제곱 오차 err 계산
                 err = (w - q_candidate) ** 2
                 # Hinv의 대각 성분 diag ([H^-1]_pp) 추출
@@ -193,8 +195,7 @@ class TrueOBS:
             print(torch.sum((self.layer(self.inp1) - self.out1) ** 2) / 128)
 
     def nmprune(self, n=2, m=4, parallel=32):
-        parallel=1
-        ipdb.set_trace()
+        
         # 1. 초기 준비 단계 (열 순서 변경 포함)
         # columnslast=True로 설정하여 가중치 W와 헤시안 H의 열 순서를 N:M 패턴 적용에 용이하도록 변경할 수 있음
         # perm은 원래 열 순서를 기억하기 위한 순열
