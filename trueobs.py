@@ -137,7 +137,6 @@ class TrueOBS:
 
             # --- 3. 반복적 가중치 양자화 루프 (논문의 Iterative Quantization) ---
             for quant_step in range(start, self.columns + 1):
-                # ipdb.set_trace()
                 # 현재 가중치 w를 양자화한 후보 q_candidate 계산
                 q_candidate = quantize(w, scale, zero, self.quantizer.maxq) # quant.py의 함수
                 # 양자화로 인한 제곱 오차 err 계산
